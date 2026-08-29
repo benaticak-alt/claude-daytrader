@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+.env.local
+*.key
+
+# Runtime output
+logs/
+cache/
+KILL_SWITCH
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ── Secret-file hardening ───────────────────────────────
+# `.env` alone does NOT match .env.backup / .env.local / .env.prod.
+# Catch every variant, then re-allow the template.
+.env.*
+!.env.example
+*.key
+*.pem
