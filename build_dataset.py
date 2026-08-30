@@ -164,6 +164,12 @@ def add_labels(df: pd.DataFrame, horizon: int, tp_atr: float, sl_atr: float) -> 
 
     Uses future bars BY DESIGN — that is what a label is. The features must
     never do this; only this function may.
+
+    Besides the binary label, records `fwd_ret_atr`: the REALIZED outcome of
+    the simulated trade, in ATR units (+tp on a win, -sl on a stop, the actual
+    drift on horizon expiry / session end). The binary label alone cannot price
+    a threshold — a stop-out and a flat expiry are both label 0 but cost very
+    different amounts, and expectancy math needs the difference.
     """
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
@@ -173,6 +179,7 @@ def add_labels(df: pd.DataFrame, horizon: int, tp_atr: float, sl_atr: float) -> 
 
     n = len(df)
     labels = np.full(n, np.nan)
+    fwd_ret = np.full(n, np.nan)
     for i in range(n):
         a = atr[i]
         if not np.isfinite(a) or a <= 0:
@@ -181,18 +188,27 @@ def add_labels(df: pd.DataFrame, horizon: int, tp_atr: float, sl_atr: float) -> 
         sl = close[i] - sl_atr * a
         end = min(i + horizon + 1, n)
         outcome = 0  # horizon expiry counts as a loss: capital tied up, no gain
+        realized = 0.0  # same-bar end-of-data: flat
+        j = i
         for j in range(i + 1, end):
             if dates[j] != dates[i]:
-                break  # never label across an overnight gap
+                j -= 1  # never hold across an overnight gap; exit at prior close
+                realized = (close[j] - close[i]) / a
+                break
             if lows[j] <= sl:
-                outcome = 0
+                realized = -sl_atr  # assume fill at the stop (optimistic: no gap-through)
                 break
             if highs[j] >= tp:
                 outcome = 1
+                realized = tp_atr
                 break
+        else:
+            realized = (close[min(j, n - 1)] - close[i]) / a  # horizon expiry
         labels[i] = outcome
+        fwd_ret[i] = realized
 
     df["label"] = labels
+    df["fwd_ret_atr"] = fwd_ret
     return df
 
 

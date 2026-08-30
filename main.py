@@ -72,6 +72,9 @@ def _make_decider(name: str):
         subs = {n: _make_decider(n) for n in names}
         log.info("scheduled routing: %s", config.STRATEGY_SCHEDULE)
         return ScheduledDecider(subs, schedule)
+    if name == "ml":
+        from decider_ml import MLDecider
+        return MLDecider()
     if name == "ollama":
         from decider_ollama import OllamaDecider
         return OllamaDecider()

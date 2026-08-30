@@ -8,6 +8,12 @@ logs/
 cache/
 KILL_SWITCH
 
+# Generated artifacts — rebuildable from the scripts, too large to version
+data/
+models/
+*.joblib
+*.parquet
+
 # Python
 __pycache__/
 *.py[cod]

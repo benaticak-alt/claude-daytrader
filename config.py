@@ -103,7 +103,9 @@ INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "90"))
 INSIDER_CACHE_MINUTES = int(os.getenv("INSIDER_CACHE_MINUTES", "60"))
 INSIDER_MAX_FILINGS_PER_SYMBOL = 40  # bound work; mega-caps file constantly
 # SEC requires a descriptive User-Agent with real contact info on every request.
-SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "claude-daytrader research benaticak@gmail.com")
+# Set SEC_USER_AGENT in .env with YOUR email — the placeholder will get the
+# feed politely rate-limited or blocked by EDGAR.
+SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "claude-daytrader research your-email@example.com")
 
 # ---------------------------------------------------------------------------
 # Decision backend:
