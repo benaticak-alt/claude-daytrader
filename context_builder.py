@@ -86,6 +86,41 @@ def _opening_range(snap: SymbolSnapshot) -> Optional[dict]:
     }
 
 
+def _ml_features(snap: SymbolSnapshot, closes: List[float], last: Optional[float],
+                 atr: Optional[float]) -> dict:
+    """Features the trained model consumes, computed with the SAME semantics as
+    build_dataset.py. Any drift between here and training silently degrades the
+    model — training-serving skew never announces itself. None where unknown;
+    the model handles missing values natively.
+    """
+    out: dict = {}
+    # Short-horizon momentum over the multi-day bar sequence, like pct_change(n).
+    for n in (1, 3, 6):
+        key = f"ret_{n}"
+        out[key] = (
+            round(100 * (closes[-1] - closes[-1 - n]) / closes[-1 - n], 4)
+            if len(closes) > n and closes[-1 - n] else None
+        )
+    out["atr_pct"] = round(100 * atr / last, 4) if (atr and last) else None
+
+    # Overnight gap: today's opening print vs the previous session's last close.
+    session = snap.session_bars
+    if session and last:
+        first_today = session[0]
+        prev = [b for b in snap.bars if b.ts < first_today.ts]
+        # Previous session close = last bar before today's first bar.
+        out["gap_pct"] = (
+            round(100 * (first_today.open - prev[-1].close) / prev[-1].close, 4)
+            if prev else None
+        )
+        et = session[-1].ts.astimezone(EASTERN)
+        out["min_since_open"] = (et.hour * 60 + et.minute) - (9 * 60 + 30)
+    else:
+        out["gap_pct"] = None
+        out["min_since_open"] = None
+    return out
+
+
 def symbol_context(snap: SymbolSnapshot) -> dict:
     closes = [b.close for b in snap.bars]           # multi-day: rolling indicators
     session = snap.session_bars                      # today only: VWAP, daily range
@@ -109,6 +144,7 @@ def symbol_context(snap: SymbolSnapshot) -> dict:
         if (session_closes and last) else None,
         "bars_today": len(session),
         "opening_range": _opening_range(snap),
+        **_ml_features(snap, closes, last, atr),
         "last_5_closes": [round(c, 2) for c in closes[-5:]],
         "volume_last_bar": snap.bars[-1].volume if snap.bars else None,
         "avg_volume_20": round(sum(b.volume for b in snap.bars[-20:]) / min(20, len(snap.bars)), 0)
