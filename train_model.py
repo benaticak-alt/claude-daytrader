@@ -82,6 +82,10 @@ def main() -> None:
     # <=1h ahead and never cross sessions, so 1 day is generous; a 10-trading-day
     # daily label needs ~14 calendar days or the folds leak.
     p.add_argument("--embargo-days", type=int, default=1)
+    # Sized for the 654k-row intraday datasets. Sparse EVENT datasets (e.g.
+    # ~1.9k insider filings) legitimately train on far less — but lowering this
+    # buys statistical fragility, so it is an explicit choice, never a default.
+    p.add_argument("--min-train-rows", type=int, default=5000)
     args = p.parse_args()
 
     features = ([f.strip() for f in args.features.split(",") if f.strip()]
@@ -122,7 +126,7 @@ def main() -> None:
 
         train_mask = day_of_row < train_cutoff
         test_mask = np.isin(day_of_row, test_days_w)
-        if train_mask.sum() < 5000 or test_mask.sum() == 0:
+        if train_mask.sum() < args.min_train_rows or test_mask.sum() == 0:
             continue
 
         model = make_model()
