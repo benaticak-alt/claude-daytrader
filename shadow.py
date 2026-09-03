@@ -144,11 +144,21 @@ class ShadowBook:
 
 
 class ShadowRunner:
-    """Runs non-executing deciders alongside the live one."""
+    """Runs non-executing deciders alongside the live one.
+
+    Shadow decisions pass through the SAME risk gate as live orders. Without
+    that, a shadow strategy trades under rules the real system would never
+    allow — sub-floor confidence, more than the position cap, entries inside
+    the end-of-day cutoff — and its record measures a strategy that could not
+    actually be run. The backtest has always gated; this path did not, which
+    made the two silently incomparable.
+    """
 
     def __init__(self, deciders: Dict[str, object], notional: float = 1000.0) -> None:
         self.deciders = deciders
         self.books = {name: ShadowBook(name, notional) for name in deciders}
+        from risk_gate import RiskGate
+        self.gate = RiskGate()
 
     def run(self, context_json: str) -> dict:
         """Returns {strategy: {decisions, events, summary}} for logging."""
@@ -168,7 +178,34 @@ class ShadowRunner:
                 scoped["open_positions"] = book.as_context_positions()
                 result: CycleDecisions = decider.decide(json.dumps(scoped))
 
-                events = book.apply(result.decisions, prices)
+                # Gate every decision exactly as the live path would, against
+                # THIS strategy's own book. daily_pl is passed as 0.0: shadow
+                # books do not track per-day realized P&L, and at these sizes
+                # the daily-loss limit would need ~100 losing trades in one
+                # session to bind, so it never gates in practice.
+                account = dict(base.get("account") or {})
+                account.setdefault("equity", 100_000.0)
+                account.setdefault("cash", 100_000.0)
+                account.setdefault("daytrade_count", 0)
+                account["daily_pl"] = 0.0
+
+                approved, rejected, n_new = [], [], 0
+                for d in result.decisions:
+                    verdict = self.gate.evaluate(
+                        d, account, book.as_context_positions(), n_new
+                    )
+                    if verdict.approved:
+                        approved.append(d)
+                        if d.action == "buy":
+                            n_new += 1
+                    else:
+                        rejected.append({
+                            "action": d.action, "symbol": d.symbol,
+                            "confidence": d.confidence,
+                            "why": "; ".join(verdict.reasons),
+                        })
+
+                events = book.apply(approved, prices)
                 out[name] = {
                     "market_read": result.market_read,
                     "proposed": [
@@ -176,6 +213,7 @@ class ShadowRunner:
                          "confidence": d.confidence}
                         for d in result.decisions
                     ],
+                    "gate_rejected": rejected,
                     "events": events,
                     "summary": book.summary(prices),
                 }
@@ -199,6 +237,12 @@ class ShadowRunner:
         }
         out = {}
         for name, book in self.books.items():
+            # Multi-day strategies opt out: flattening a 21-day hold every
+            # evening would destroy the effect being measured.
+            if getattr(self.deciders.get(name), "holds_overnight", False):
+                out[name] = {"events": [], "summary": book.summary(prices),
+                             "held_overnight": True}
+                continue
             events = book.flatten(prices)
             if events:
                 log.info("shadow[%s] EOD flatten: %s", name,

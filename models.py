@@ -17,7 +17,15 @@ class TradeDecision(BaseModel):
     thesis: str = Field(description="2-4 sentence reasoning for the decision")
     invalidation: str = Field(description="Concrete condition that would prove the thesis wrong")
     suggested_notional: float = Field(ge=0.0, description="Suggested position size in dollars")
-    time_horizon_minutes: int = Field(ge=5, le=390, description="Expected holding period")
+    # 390 minutes is one trading day. The cap was originally that, from an
+    # intraday-only assumption; the insider strategy holds 21 trading days, so
+    # the ceiling is now 30 trading days. Anything beyond that is a bug, not a
+    # thesis. Strategies that hold overnight must also set
+    # `holds_overnight = True` on the decider, or the end-of-day flatten will
+    # close the position the evening it opens.
+    time_horizon_minutes: int = Field(
+        ge=5, le=390 * 30, description="Expected holding period, minutes"
+    )
 
 
 class CycleDecisions(BaseModel):

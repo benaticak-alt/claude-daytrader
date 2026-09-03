@@ -4,9 +4,11 @@ An autonomous US-equities trading system built to answer one question honestly:
 **is there retail-accessible intraday edge on free data — and can I trust my own
 measurement of it?**
 
-The answer to the first question turned out to be **no**, measured across four
+For price-and-volume strategies the answer is **no** — measured across four
 hand-written strategies, three machine-learned models, ~25,000 backtested rule
-trades and ~700,000 out-of-sample model predictions. The answer to the second
+trades and ~700,000 out-of-sample model predictions. One **event-driven** signal
+(SEC Form 4 insider buying) did survive, marginally, and is now in forward
+testing rather than trading. The answer to the second
 question is the actual product: a validation pipeline that caught, before any
 capital was at risk, every one of the illusions that usually make trading bots
 look profitable — including two lookahead leaks in my own feature code, a
@@ -27,6 +29,23 @@ model that passed the deployment gate on pure bull-market drift.
 | GBM, ±1 ATR / 1h label | 331k OOS predictions, 6 walk-forward folds | AUC 0.527 (stable) — **−$0.47** best threshold |
 | GBM, ±2 ATR / 4h label | 331k OOS predictions | AUC 0.564 — **−$0.43**: learned *volatility*, not direction |
 | GBM, daily ±1.5 ATR / 10d | 32.5k OOS predictions | AUC 0.504 — "+$6.25/trade" that was **beta, not alpha** (below) |
+
+**One signal did survive — SEC Form 4 insider buying.** Against a symbol- and
+period-matched control (the same 71 stocks, same window, same barriers, so both
+market drift and stock selection are differenced out), open-market insider
+purchases returned **+$22.17/trade vs +$4.84 for the control**. Correcting for
+overlapping 21-day holds — the honest number — leaves **+$13.51/trade excess,
+t=2.21, n=105**. It strengthens when the dominant symbol is removed, appears in
+5 of 6 quarters, and the effect ordering matches the academic literature
+(C-suite +$36 > directors +$31 > 10% owners +$11). A month-block bootstrap puts
+the 95% CI at [+1.44, +32.44] — excluding zero, but only just.
+
+Two caveats keep it out of live capital: **survivorship bias is uncorrected**
+(only currently-listed symbols exist in the data, and insiders are famous for
+buying falling knives), and a **trained model on these events scored AUC 0.473**
+— below random — meaning there is no skill in *selecting* among insider buys.
+The strategy is "take them all", and it is currently in forward shadow testing,
+which is the only thing that removes the survivorship problem.
 
 Three results worth the whole project:
 

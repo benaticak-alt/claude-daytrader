@@ -72,6 +72,9 @@ def _make_decider(name: str):
         subs = {n: _make_decider(n) for n in names}
         log.info("scheduled routing: %s", config.STRATEGY_SCHEDULE)
         return ScheduledDecider(subs, schedule)
+    if name == "insider":
+        from decider_insider import InsiderDecider
+        return InsiderDecider()
     if name == "ml":
         from decider_ml import MLDecider
         return MLDecider()
@@ -152,8 +155,12 @@ def run_cycle(
 
     # End-of-day flatten. Runs before anything else and returns immediately:
     # this strategy must never carry an overnight gap.
+    # A multi-day strategy must not be flattened nightly — that would destroy
+    # the effect it was measured on. Such deciders declare holds_overnight.
+    live_holds_overnight = getattr(decider, "holds_overnight", False)
+
     if mins_left is not None and 0 < mins_left <= config.FLATTEN_BEFORE_CLOSE_MIN:
-        if positions and not config.OBSERVE_MODE:
+        if positions and not config.OBSERVE_MODE and not live_holds_overnight:
             log.warning("EOD flatten: %.0f min to close, closing %d position(s)",
                         mins_left, len(positions))
             for pos in positions:
