@@ -20,7 +20,13 @@ config.SHADOW_BACKENDS = ["rule", "orb", "meanrev"]
 config.DECIDER_BACKEND = "rule"
 
 import main  # noqa: E402
+import shadow  # noqa: E402
 from data_feed import DataFeed  # noqa: E402
+
+# Never read or overwrite the live shadow books from a test run.
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+shadow.BOOKS_PATH = Path(tempfile.mkdtemp()) / "shadow_books.json"
 from risk_gate import RiskGate  # noqa: E402
 
 results: list[tuple[bool, str, str]] = []

@@ -30,12 +30,15 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import config
 from models import CycleDecisions, TradeDecision
 
 log = logging.getLogger(__name__)
+
+STATE_PATH = Path(__file__).parent / "cache" / "insider_decider_state.json"
 
 TP_ATR = 1.5
 SL_ATR = 1.5
@@ -56,9 +59,38 @@ class InsiderDecider:
     holds_overnight = True
 
     def __init__(self) -> None:
-        # symbol -> {"atr": entry ATR, "ts": entry time iso}; lost on restart,
-        # after which positions fall back to barrier management only.
+        # symbol -> {"atr": entry DAILY ATR, "ts": entry time iso}. Persisted:
+        # a 21-day hold outlives any single process, and after a restart the
+        # position must still know its barriers and its clock.
         self._entries: Dict[str, dict] = {}
+        # symbol -> filing date already acted on. ONE ENTRY PER FILING. Without
+        # this the strategy re-enters the same disclosure every time the
+        # previous position closes — observed live: GME six times in two days —
+        # which is not the strategy whose edge was measured (one trade per event).
+        self._acted: Dict[str, str] = {}
+        self._load_state()
+
+    # ------------------------------------------------------------------
+    def _load_state(self) -> None:
+        try:
+            if STATE_PATH.exists():
+                st = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+                self._entries = st.get("entries", {})
+                self._acted = st.get("acted", {})
+                log.info("insider state loaded: %d open entries, %d filings acted on",
+                         len(self._entries), len(self._acted))
+        except Exception:
+            log.exception("could not load insider state — starting fresh")
+
+    def _save_state(self) -> None:
+        try:
+            STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            STATE_PATH.write_text(
+                json.dumps({"entries": self._entries, "acted": self._acted}),
+                encoding="utf-8",
+            )
+        except Exception:
+            log.exception("could not save insider state")
 
     # ------------------------------------------------------------------
     def decide(self, context_json: str) -> CycleDecisions:
@@ -68,9 +100,11 @@ class InsiderDecider:
         held = {p["symbol"] for p in positions}
         as_of = ctx.get("as_of_et")
 
+        changed = False
         for sym in list(self._entries):
             if sym not in held:
                 self._entries.pop(sym, None)
+                changed = True
 
         decisions: List[TradeDecision] = []
         for pos in positions:
@@ -89,21 +123,33 @@ class InsiderDecider:
         # Rank by conviction so the position cap spends itself on the strongest
         # events, but take every one that qualifies — there is no selection model.
         candidates.sort(key=lambda c: c[0], reverse=True)
-        for confidence, sym, note in candidates[:2]:
+        for confidence, sym, note, filing in candidates[:2]:
             row = rows[sym]
+            atr_d = row.get("atr_daily")
+            if not atr_d:
+                # No daily ATR means no correctly-sized barriers. Skip rather
+                # than fall back to the intraday ATR, which is the exact unit
+                # error that made the first forward test meaningless.
+                log.warning("%s: insider event but no daily ATR — skipping", sym)
+                continue
             decisions.append(TradeDecision(
                 symbol=sym,
                 action="buy",
                 confidence=confidence,
                 thesis=f"Insider open-market buy: {note}",
                 invalidation=(
-                    f"-{SL_ATR:g} ATR from entry, +{TP_ATR:g} ATR target, or "
-                    f"{HOLD_TRADING_DAYS} trading days elapsed."
+                    f"-{SL_ATR:g} DAILY ATR from entry, +{TP_ATR:g} daily ATR target, "
+                    f"or {HOLD_TRADING_DAYS} trading days elapsed."
                 ),
                 suggested_notional=config.FLAT_POSITION_NOTIONAL,
                 time_horizon_minutes=HOLD_TRADING_DAYS * 390,
             ))
-            self._entries[sym] = {"atr": row.get("atr_14"), "ts": as_of}
+            self._entries[sym] = {"atr": atr_d, "ts": as_of}
+            self._acted[sym] = filing
+            changed = True
+
+        if changed:
+            self._save_state()
 
         with_events = sum(
             1 for r in rows.values()
@@ -118,7 +164,7 @@ class InsiderDecider:
         )
 
     # ------------------------------------------------------------------
-    def _score(self, row: dict) -> Optional[tuple[float, str, str]]:
+    def _score(self, row: dict) -> Optional[tuple[float, str, str, str]]:
         ins = row.get("insider_form4")
         if not ins or ins.get("insider_data") == "unavailable":
             return None
@@ -134,6 +180,13 @@ class InsiderDecider:
         recent = ins.get("filings_today") or 0
         most_recent = buys.get("most_recent")
         if not recent and not self._is_fresh(most_recent):
+            return None
+
+        # One entry per filing. The event key is the most recent buy date; if
+        # this symbol has already been traded on that date's disclosure, the
+        # event is spent — regardless of whether the position has since closed.
+        filing_key = str(most_recent or datetime.now().date().isoformat())
+        if self._acted.get(row["symbol"]) == filing_key:
             return None
 
         insiders = buys.get("distinct_insiders") or 0
@@ -161,7 +214,7 @@ class InsiderDecider:
             + (", C-SUITE" if csuite else "")
             + (f", {recent} filed today" if recent else "")
         )
-        return confidence, row["symbol"], note
+        return confidence, row["symbol"], note, filing_key
 
     @staticmethod
     def _is_fresh(most_recent: Optional[str]) -> bool:
@@ -184,7 +237,7 @@ class InsiderDecider:
             return None
 
         rec = self._entries.get(pos["symbol"], {})
-        atr = rec.get("atr") or row.get("atr_14")
+        atr = rec.get("atr") or row.get("atr_daily")
         if not atr:
             return None
 
