@@ -145,7 +145,8 @@ def main() -> None:
     gate = RiskGate()
     executor = MockExecutor()
     # Run ORB in shadow alongside the live rule, exactly as the real loop does.
-    shadow = ShadowRunner({"orb": ORBDecider()}, config.FLAT_POSITION_NOTIONAL)
+    shadow = ShadowRunner({"orb": ORBDecider()}, config.FLAT_POSITION_NOTIONAL,
+                          persist=False)   # synthetic run: never touch the live books
 
     regimes = {
         "NVDA": "pullback_uptrend",   # should pass the filter

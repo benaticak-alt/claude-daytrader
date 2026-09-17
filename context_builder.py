@@ -138,7 +138,8 @@ def symbol_context(snap: SymbolSnapshot) -> dict:
         "session_vwap": round(vwap, 4) if vwap else None,
         "pct_vs_vwap": round(100 * (last - vwap) / vwap, 3) if (vwap and last) else None,
         "rsi_14": round(rsi, 1) if rsi is not None else None,
-        "atr_14": round(atr, 4) if atr else None,
+        "atr_14": round(atr, 4) if atr else None,          # 5-minute bars: intraday unit
+        "atr_daily": round(snap.atr_daily, 4) if snap.atr_daily else None,  # multi-day unit
         # Today's range — computed from session bars so it isn't a multi-day span.
         "range_pct_today": round(100 * (max(session_closes) - min(session_closes)) / last, 2)
         if (session_closes and last) else None,

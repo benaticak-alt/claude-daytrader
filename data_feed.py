@@ -47,6 +47,11 @@ class SymbolSnapshot:
     quote_ts: datetime
     data_ok: bool = True
     data_issues: List[str] = field(default_factory=list)
+    # ATR(14) on DAILY bars. The 5-minute `bars` above yield an intraday ATR
+    # roughly a tenth this size; a multi-day strategy sized on that would hit
+    # its barriers within minutes. Measured edges must be traded in the unit
+    # they were measured in.
+    atr_daily: Optional[float] = None
 
     @property
     def mid(self) -> float:
@@ -101,6 +106,36 @@ class DataFeed:
         )
         if self._feed is AlpacaFeed.IEX:
             log.info("using IEX feed (free tier) — partial view of national volume")
+        # symbol -> (ET date computed, atr). Daily ATR barely moves intraday and
+        # the fetch is 30 bars, so once per symbol per day is plenty.
+        self._daily_atr_cache: Dict[str, tuple] = {}
+
+    def daily_atr(self, symbol: str, period: int = 14) -> Optional[float]:
+        """ATR(period) on daily bars, cached per symbol per calendar day."""
+        today = datetime.now(EASTERN).date()
+        hit = self._daily_atr_cache.get(symbol)
+        if hit and hit[0] == today:
+            return hit[1]
+        try:
+            end = datetime.now(timezone.utc)
+            req = StockBarsRequest(
+                symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                start=end - timedelta(days=60), end=end, feed=self._feed,
+            )
+            days = self._client.get_stock_bars(req).data.get(symbol, [])
+        except Exception:
+            log.exception("daily bars fetch failed for %s", symbol)
+            return hit[1] if hit else None
+        if len(days) < period + 1:
+            return None
+        trs = []
+        for prev, cur in zip(days[-period - 1:-1], days[-period:]):
+            trs.append(max(cur.high - cur.low,
+                           abs(cur.high - prev.close),
+                           abs(cur.low - prev.close)))
+        atr = sum(trs) / period
+        self._daily_atr_cache[symbol] = (today, atr)
+        return atr
 
     def snapshot(self, symbol: str) -> SymbolSnapshot:
         quote_req = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=self._feed)
@@ -133,6 +168,7 @@ class DataFeed:
             bid=float(quote.bid_price or 0),
             ask=float(quote.ask_price or 0),
             quote_ts=quote.timestamp,
+            atr_daily=self.daily_atr(symbol),
         )
         self._validate(snap)
         return snap

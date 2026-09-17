@@ -16,12 +16,19 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import config
 from models import CycleDecisions
 
 log = logging.getLogger(__name__)
+
+# Virtual books survive restarts. Without this a process restart silently
+# liquidated every shadow position at zero P&L — harmless for a strategy that
+# flattens nightly anyway, fatal for one whose whole edge is a 21-day hold
+# (the Sept 15 restart erased an open UPST insider position).
+BOOKS_PATH = Path(__file__).parent / "cache" / "shadow_books.json"
 
 
 @dataclass
@@ -142,6 +149,27 @@ class ShadowBook:
             "open": sorted(self.positions),
         }
 
+    def to_dict(self) -> dict:
+        return {
+            "notional": self.notional,
+            "realized_pnl": self.realized_pnl,
+            "wins": self.wins, "losses": self.losses, "trades": self.trades,
+            "positions": {
+                s: {"qty": p.qty, "entry_price": p.entry_price}
+                for s, p in self.positions.items()
+            },
+        }
+
+    def restore(self, st: dict) -> None:
+        self.realized_pnl = float(st.get("realized_pnl", 0.0))
+        self.wins = int(st.get("wins", 0))
+        self.losses = int(st.get("losses", 0))
+        self.trades = int(st.get("trades", 0))
+        self.positions = {
+            s: VirtualPosition(s, float(p["qty"]), float(p["entry_price"]))
+            for s, p in (st.get("positions") or {}).items()
+        }
+
 
 class ShadowRunner:
     """Runs non-executing deciders alongside the live one.
@@ -154,11 +182,42 @@ class ShadowRunner:
     made the two silently incomparable.
     """
 
-    def __init__(self, deciders: Dict[str, object], notional: float = 1000.0) -> None:
+    def __init__(self, deciders: Dict[str, object], notional: float = 1000.0,
+                 persist: bool = True) -> None:
         self.deciders = deciders
         self.books = {name: ShadowBook(name, notional) for name in deciders}
         from risk_gate import RiskGate
         self.gate = RiskGate()
+        self.persist = persist
+        if persist:
+            self._load_books()
+
+    # ------------------------------------------------------------------
+    def _load_books(self) -> None:
+        try:
+            if not BOOKS_PATH.exists():
+                return
+            saved = json.loads(BOOKS_PATH.read_text(encoding="utf-8"))
+            for name, book in self.books.items():
+                if name in saved:
+                    book.restore(saved[name])
+                    if book.positions:
+                        log.info("shadow[%s] restored: %d open, realized %+.2f",
+                                 name, len(book.positions), book.realized_pnl)
+        except Exception:
+            log.exception("could not load shadow books — starting fresh")
+
+    def _save_books(self) -> None:
+        if not self.persist:
+            return
+        try:
+            BOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            BOOKS_PATH.write_text(
+                json.dumps({n: b.to_dict() for n, b in self.books.items()}),
+                encoding="utf-8",
+            )
+        except Exception:
+            log.exception("could not save shadow books")
 
     def run(self, context_json: str) -> dict:
         """Returns {strategy: {decisions, events, summary}} for logging."""
@@ -226,6 +285,7 @@ class ShadowRunner:
                 # A broken experiment must never disturb live trading.
                 log.exception("shadow decider %s failed — ignoring", name)
                 out[name] = {"error": True}
+        self._save_books()
         return out
 
     def flatten_all(self, context_json: str) -> dict:
@@ -248,6 +308,7 @@ class ShadowRunner:
                 log.info("shadow[%s] EOD flatten: %s", name,
                          "; ".join(f"{e['symbol']} pnl={e['pnl']:+.2f}" for e in events))
             out[name] = {"events": events, "summary": book.summary(prices)}
+        self._save_books()
         return out
 
     def report(self, prices: Optional[Dict[str, float]] = None) -> str:
