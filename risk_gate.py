@@ -18,6 +18,42 @@ log = logging.getLogger(__name__)
 
 
 class RiskGate:
+    """Per-strategy limits override config where a strategy declares them.
+
+    The intraday defaults (3 positions, $2k each, flat $1k) exist to bound
+    overnight-gap risk on 5-minute strategies. A 21-day event strategy sized
+    that way can never hold the diversified book its edge was measured on, so
+    a decider may declare `gate_params` — read by main and by the shadow
+    runner — with any of:
+
+        max_positions          concurrent-position cap
+        max_position_notional  hard $ ceiling per position
+        size_pct_equity        size = equity * this (overrides flat sizing)
+        no_entry_before_close_min
+
+    Everything a strategy does NOT override keeps the config value, and the
+    half-of-cash ceiling and kill switch can never be relaxed.
+    """
+
+    def __init__(self, max_positions: int | None = None,
+                 max_position_notional: float | None = None,
+                 size_pct_equity: float | None = None,
+                 no_entry_before_close_min: float | None = None) -> None:
+        self.max_positions = max_positions
+        self.max_position_notional = max_position_notional
+        self.size_pct_equity = size_pct_equity
+        self.no_entry_before_close_min = no_entry_before_close_min
+
+    @classmethod
+    def for_decider(cls, decider: object) -> "RiskGate":
+        params = dict(getattr(decider, "gate_params", None) or {})
+        allowed = {"max_positions", "max_position_notional", "size_pct_equity",
+                   "no_entry_before_close_min"}
+        unknown = set(params) - allowed
+        if unknown:
+            log.warning("ignoring unknown gate_params %s", sorted(unknown))
+        return cls(**{k: v for k, v in params.items() if k in allowed})
+
     def evaluate(
         self,
         decision: TradeDecision,
@@ -63,7 +99,8 @@ class RiskGate:
             )
 
         # 4. Concurrent position cap (existing + already approved this cycle).
-        if len(open_positions) + approved_this_cycle >= config.MAX_CONCURRENT_POSITIONS:
+        max_pos = self.max_positions or config.MAX_CONCURRENT_POSITIONS
+        if len(open_positions) + approved_this_cycle >= max_pos:
             reasons.append(
                 f"position cap reached ({len(open_positions)} open + {approved_this_cycle} pending)"
             )
@@ -92,12 +129,14 @@ class RiskGate:
         #    strategy's sizing never priced in. Unknown time-to-close fails
         #    closed rather than assuming there's plenty of session left.
         mins = account.get("minutes_to_close")
+        cutoff = (self.no_entry_before_close_min
+                  if self.no_entry_before_close_min is not None
+                  else config.NO_ENTRY_BEFORE_CLOSE_MIN)
         if mins is None:
             reasons.append("time-to-close unknown — fail closed")
-        elif mins <= config.NO_ENTRY_BEFORE_CLOSE_MIN:
+        elif mins <= cutoff:
             reasons.append(
-                f"too close to the bell ({mins:.0f}min left, "
-                f"cutoff {config.NO_ENTRY_BEFORE_CLOSE_MIN}min)"
+                f"too close to the bell ({mins:.0f}min left, cutoff {cutoff}min)"
             )
 
         if reasons:
@@ -130,7 +169,12 @@ class RiskGate:
         Both are then floored by the hard per-position ceiling and by half of
         available cash. Missing equity or cash yields 0, so the caller rejects.
         """
-        if not config.CONFIDENCE_SIZING:
+        if self.size_pct_equity is not None:
+            equity = account.get("equity")
+            if equity is None:
+                return 0.0
+            target = equity * self.size_pct_equity
+        elif not config.CONFIDENCE_SIZING:
             target = config.FLAT_POSITION_NOTIONAL
         else:
             equity = account.get("equity")
@@ -149,4 +193,5 @@ class RiskGate:
             log.warning("cash unavailable — cannot size safely, failing closed")
             return 0.0
 
-        return max(0.0, min(target, config.MAX_POSITION_NOTIONAL, cash * config.MAX_CASH_FRACTION))
+        ceiling = self.max_position_notional or config.MAX_POSITION_NOTIONAL
+        return max(0.0, min(target, ceiling, cash * config.MAX_CASH_FRACTION))

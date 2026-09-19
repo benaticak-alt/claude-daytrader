@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
 
+from alpaca.data.enums import Adjustment
 from alpaca.data.enums import DataFeed as AlpacaFeed  # aliased: our class is DataFeed too
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
@@ -52,6 +53,9 @@ class SymbolSnapshot:
     # its barriers within minutes. Measured edges must be traded in the unit
     # they were measured in.
     atr_daily: Optional[float] = None
+    # Daily-bar context for the event strategies (all through YESTERDAY's close).
+    dollar_vol_20: Optional[float] = None    # 20-day average $ traded per day
+    dist_ma50_pct: Optional[float] = None    # % distance of last close from 50d MA
 
     @property
     def mid(self) -> float:
@@ -106,40 +110,75 @@ class DataFeed:
         )
         if self._feed is AlpacaFeed.IEX:
             log.info("using IEX feed (free tier) — partial view of national volume")
-        # symbol -> (ET date computed, atr). Daily ATR barely moves intraday and
-        # the fetch is 30 bars, so once per symbol per day is plenty.
-        self._daily_atr_cache: Dict[str, tuple] = {}
+        # symbol -> (ET date computed, stats). Daily figures barely move
+        # intraday and the fetch is ~80 bars, so once per symbol per day is plenty.
+        self._daily_cache: Dict[str, tuple] = {}
 
-    def daily_atr(self, symbol: str, period: int = 14) -> Optional[float]:
-        """ATR(period) on daily bars, cached per symbol per calendar day."""
+    def daily_stats(self, symbol: str, period: int = 14) -> dict:
+        """Daily-bar statistics, cached per symbol per calendar day.
+
+        Returns {"atr", "dollar_vol_20", "dist_ma50_pct", "close"} — any of
+        which may be None. Uses SIP (full consolidated tape; the free tier only
+        forbids the last 15 minutes, so `end` is set 16 minutes back) with
+        split/dividend adjustment, and drops today's still-forming bar so every
+        figure is through yesterday's close. Falls back to IEX if SIP refuses.
+        """
         today = datetime.now(EASTERN).date()
-        hit = self._daily_atr_cache.get(symbol)
+        hit = self._daily_cache.get(symbol)
         if hit and hit[0] == today:
             return hit[1]
-        try:
-            end = datetime.now(timezone.utc)
-            req = StockBarsRequest(
-                symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
-                start=end - timedelta(days=60), end=end, feed=self._feed,
-            )
-            days = self._client.get_stock_bars(req).data.get(symbol, [])
-        except Exception:
-            log.exception("daily bars fetch failed for %s", symbol)
-            return hit[1] if hit else None
+        empty = {"atr": None, "dollar_vol_20": None, "dist_ma50_pct": None, "close": None}
+
+        end = datetime.now(timezone.utc) - timedelta(minutes=16)
+        days = []
+        for feed in (AlpacaFeed.SIP, self._feed):
+            try:
+                req = StockBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                    start=end - timedelta(days=120), end=end, feed=feed,
+                    adjustment=Adjustment.ALL,   # a split inside the window is not volatility
+                )
+                days = self._client.get_stock_bars(req).data.get(symbol, [])
+                break
+            except Exception:
+                log.warning("daily bars via %s failed for %s", feed.value, symbol)
+        days = [b for b in days if b.timestamp.astimezone(EASTERN).date() < today]
         if len(days) < period + 1:
-            return None
+            return hit[1] if hit else empty
+
         trs = []
         for prev, cur in zip(days[-period - 1:-1], days[-period:]):
             trs.append(max(cur.high - cur.low,
                            abs(cur.high - prev.close),
                            abs(cur.low - prev.close)))
-        atr = sum(trs) / period
-        self._daily_atr_cache[symbol] = (today, atr)
-        return atr
+        closes = [b.close for b in days]
+        last20 = days[-20:]
+        stats = {
+            "atr": sum(trs) / period,
+            "dollar_vol_20": sum(b.close * b.volume for b in last20) / len(last20),
+            "dist_ma50_pct": (100 * (closes[-1] / (sum(closes[-50:]) / 50) - 1)
+                              if len(closes) >= 50 else None),
+            "close": closes[-1],
+        }
+        self._daily_cache[symbol] = (today, stats)
+        return stats
+
+    def daily_atr(self, symbol: str, period: int = 14) -> Optional[float]:
+        """ATR(period) on daily bars — see daily_stats()."""
+        return self.daily_stats(symbol, period)["atr"]
 
     def snapshot(self, symbol: str) -> SymbolSnapshot:
         quote_req = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=self._feed)
-        quote = self._client.get_stock_latest_quote(quote_req)[symbol]
+        quotes = self._client.get_stock_latest_quote(quote_req)
+        if symbol not in quotes:
+            # Unknown to the feed (new listing, OTC, typo in a filing's ticker).
+            # A snapshot that fails the gate is the right answer, not a crash.
+            snap = SymbolSnapshot(symbol=symbol, bars=[], bid=0.0, ask=0.0,
+                                  quote_ts=datetime.now(timezone.utc))
+            snap.data_issues.append("no quote available for symbol")
+            snap.data_ok = False
+            return snap
+        quote = quotes[symbol]
 
         end = datetime.now(timezone.utc)
         # Calendar days, not bar count — must span weekends/holidays so a Monday
@@ -162,13 +201,16 @@ class DataFeed:
         if len(bars) > config.BAR_LOOKBACK:
             bars = bars[-config.BAR_LOOKBACK:]
 
+        daily = self.daily_stats(symbol)
         snap = SymbolSnapshot(
             symbol=symbol,
             bars=bars,
             bid=float(quote.bid_price or 0),
             ask=float(quote.ask_price or 0),
             quote_ts=quote.timestamp,
-            atr_daily=self.daily_atr(symbol),
+            atr_daily=daily["atr"],
+            dollar_vol_20=daily["dollar_vol_20"],
+            dist_ma50_pct=daily["dist_ma50_pct"],
         )
         self._validate(snap)
         return snap

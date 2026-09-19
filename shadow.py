@@ -64,8 +64,13 @@ class ShadowBook:
             for p in self.positions.values()
         ]
 
-    def apply(self, decisions, prices: Dict[str, float]) -> List[dict]:
+    def apply(self, decisions, prices: Dict[str, float],
+              sizes: Optional[Dict[str, float]] = None) -> List[dict]:
         """Execute decisions against the virtual book. Returns a log record.
+
+        `sizes` maps symbol -> notional the risk gate approved; absent that,
+        the book's flat notional is used. The gate owns sizing live, so the
+        shadow must fill at the gate's number too or the two diverge.
 
         Fills are charged SHADOW_SLIPPAGE_BPS per side. Filling at the midpoint
         would flatter every strategy — real orders cross the spread, and at the
@@ -95,7 +100,8 @@ class ShadowBook:
 
             elif d.action == "buy" and d.symbol not in self.positions:
                 fill = mid * (1 + slip)          # buy at the offer
-                qty = self.notional / fill
+                notional = (sizes or {}).get(d.symbol) or self.notional
+                qty = notional / fill
                 self.positions[d.symbol] = VirtualPosition(d.symbol, qty, fill)
                 events.append({
                     "action": "buy", "symbol": d.symbol, "price": round(fill, 4),
@@ -187,7 +193,10 @@ class ShadowRunner:
         self.deciders = deciders
         self.books = {name: ShadowBook(name, notional) for name in deciders}
         from risk_gate import RiskGate
-        self.gate = RiskGate()
+        # One gate per strategy: a decider may declare gate_params (position
+        # cap, sizing) and the shadow must honour exactly what live would.
+        self.gates = {name: RiskGate.for_decider(d) for name, d in deciders.items()}
+        self.gate = RiskGate()          # config defaults, kept for callers
         self.persist = persist
         if persist:
             self._load_books()
@@ -249,14 +258,18 @@ class ShadowRunner:
                 account["daily_pl"] = 0.0
 
                 approved, rejected, n_new = [], [], 0
+                sizes: Dict[str, float] = {}
+                gate = self.gates.get(name, self.gate)
                 for d in result.decisions:
-                    verdict = self.gate.evaluate(
+                    verdict = gate.evaluate(
                         d, account, book.as_context_positions(), n_new
                     )
                     if verdict.approved:
                         approved.append(d)
                         if d.action == "buy":
                             n_new += 1
+                            if verdict.capped_notional:
+                                sizes[d.symbol] = verdict.capped_notional
                     else:
                         rejected.append({
                             "action": d.action, "symbol": d.symbol,
@@ -264,7 +277,7 @@ class ShadowRunner:
                             "why": "; ".join(verdict.reasons),
                         })
 
-                events = book.apply(approved, prices)
+                events = book.apply(approved, prices, sizes)
                 out[name] = {
                     "market_read": result.market_read,
                     "proposed": [

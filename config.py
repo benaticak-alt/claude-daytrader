@@ -107,6 +107,24 @@ INSIDER_MAX_FILINGS_PER_SYMBOL = 40  # bound work; mega-caps file constantly
 # feed politely rate-limited or blocked by EDGAR.
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "claude-daytrader research your-email@example.com")
 
+# --- Universe-wide insider strategy (decider_insider.py + insider_universe_feed.py)
+# Every Form 4 on EDGAR, not just the watchlist. Filters are the ones that
+# held up in the 66k-event study (insider_universe_study.py, entry=open1):
+#   >= $1M/day liquidity, purchase >= $100k, officer or director filer,
+#   not a "routine" trader (Cohen-Malloy-Pomorski), price paid within 10% of
+#   market (deeper = a placement coded P, not conviction).
+INSIDER_UNIVERSE_ENABLED = os.getenv("INSIDER_UNIVERSE_ENABLED", "true").lower() != "false"
+INSIDER_MAX_FILING_AGE_DAYS = int(os.getenv("INSIDER_MAX_FILING_AGE_DAYS", "3"))
+INSIDER_MIN_BUY_USD = float(os.getenv("INSIDER_MIN_BUY_USD", "100000"))
+INSIDER_MIN_DOLLAR_VOL = float(os.getenv("INSIDER_MIN_DOLLAR_VOL", "1000000"))
+INSIDER_MAX_DISCOUNT_PCT = float(os.getenv("INSIDER_MAX_DISCOUNT_PCT", "10"))
+INSIDER_MAX_POSITIONS = int(os.getenv("INSIDER_MAX_POSITIONS", "10"))
+# Fraction of equity the whole insider book may hold; per-position size is
+# this divided by INSIDER_MAX_POSITIONS. Half of equity is the owner's rule.
+INSIDER_EXPOSURE = float(os.getenv("INSIDER_EXPOSURE", "0.5"))
+# How many extra (non-watchlist) symbols a cycle may snapshot for the strategy.
+INSIDER_MAX_CANDIDATES = int(os.getenv("INSIDER_MAX_CANDIDATES", "40"))
+
 # ---------------------------------------------------------------------------
 # Decision backend:
 #   "claude" — Opus 5 forms theses (costs money)

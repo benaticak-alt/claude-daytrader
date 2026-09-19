@@ -1,4 +1,4 @@
-﻿"""Main decision loop.
+"""Main decision loop.
 
 data feed -> context builder -> Claude -> risk gate -> executor -> log
 Run:  python main.py            (loops during market hours)
@@ -75,6 +75,11 @@ def _make_decider(name: str):
     if name == "insider":
         from decider_insider import InsiderDecider
         return InsiderDecider()
+    if name == "insider_regime":
+        # Same strategy, plus "no new entries while SPY is below its 50-day
+        # average". Run as a second shadow so the filter is TESTED, not assumed.
+        from decider_insider import InsiderDecider
+        return InsiderDecider(regime=True, name="insider_regime")
     if name == "ml":
         from decider_ml import MLDecider
         return MLDecider()
@@ -144,9 +149,33 @@ def run_cycle(
     executor: Executor,
     insider_feed: InsiderFeed | None,
     shadow_runner=None,
+    universe_feed=None,
 ) -> None:
     account = executor.account_state()
     positions = executor.open_positions()
+
+    # Symbols this cycle: the watchlist, plus whatever the universe-wide insider
+    # feed says is worth a look, plus anything any book already holds (a held
+    # symbol with no row can never be exited).
+    symbols = list(config.WATCHLIST)
+    insider_events: list = []
+    if universe_feed is not None:
+        try:
+            universe_feed.refresh()
+            insider_events = universe_feed.fresh_events()
+            extra = universe_feed.candidate_symbols(config.INSIDER_MIN_BUY_USD)
+            for s in extra[: config.INSIDER_MAX_CANDIDATES]:
+                if s not in symbols:
+                    symbols.append(s)
+        except Exception:
+            log.exception("insider universe refresh failed — continuing without it")
+    held_everywhere = {p["symbol"] for p in positions}
+    if shadow_runner is not None:
+        for book in shadow_runner.books.values():
+            held_everywhere |= set(book.positions)
+    for s in sorted(held_everywhere):
+        if s not in symbols:
+            symbols.append(s)
 
     # Time-to-close drives both the entry cutoff (enforced in the risk gate)
     # and the hard flatten below.
@@ -190,7 +219,7 @@ def run_cycle(
         return
 
     snapshots = []
-    for symbol in config.WATCHLIST:
+    for symbol in symbols:
         try:
             snapshots.append(feed.snapshot(symbol))
         except Exception:
@@ -211,7 +240,8 @@ def run_cycle(
             except Exception:
                 log.exception("insider lookup failed for %s", snap.symbol)
 
-    context_json = build_context(snapshots, account, positions, insider or None)
+    context_json = build_context(snapshots, account, positions, insider or None,
+                                 insider_events or None)
 
     # OBSERVE MODE: every strategy runs through the shadow runner (including the
     # configured backend) and nothing reaches the broker. No live decider runs,
@@ -266,13 +296,17 @@ def main() -> None:
     feed = DataFeed()
     decider = build_decider()
     shadow_runner = build_shadow_runner()
-    gate = RiskGate()
+    gate = RiskGate.for_decider(decider)      # honours the live strategy's limits
     executor = Executor()
     insider_feed = (
         InsiderFeed(config.INSIDER_LOOKBACK_DAYS, config.INSIDER_CACHE_MINUTES)
         if config.INSIDER_ENABLED
         else None
     )
+    universe_feed = None
+    if config.INSIDER_UNIVERSE_ENABLED:
+        from insider_universe_feed import InsiderUniverseFeed
+        universe_feed = InsiderUniverseFeed(config.INSIDER_MAX_FILING_AGE_DAYS)
 
     mode = "OBSERVE (no orders)" if config.OBSERVE_MODE else (
         "PAPER" if config.ALPACA_PAPER else "LIVE")
@@ -283,7 +317,7 @@ def main() -> None:
     log.info("=" * 60)
 
     if args.once:
-        run_cycle(feed, decider, gate, executor, insider_feed, shadow_runner)
+        run_cycle(feed, decider, gate, executor, insider_feed, shadow_runner, universe_feed)
         return
 
     cycles = 0
@@ -301,7 +335,8 @@ def main() -> None:
             else:
                 heartbeat = 0
                 try:
-                    run_cycle(feed, decider, gate, executor, insider_feed, shadow_runner)
+                    run_cycle(feed, decider, gate, executor, insider_feed, shadow_runner,
+                              universe_feed)
                     cycles += 1
                 except Exception:
                     log.exception("cycle failed — continuing")

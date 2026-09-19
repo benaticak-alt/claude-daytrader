@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 import config
+from alpaca.data.enums import Adjustment
 from alpaca.data.enums import DataFeed as AlpacaFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -142,6 +143,7 @@ def main() -> None:
             bars = client.get_stock_bars(StockBarsRequest(
                 symbol_or_symbols=sym, timeframe=TimeFrame.Day,
                 start=start, end=end, feed=AlpacaFeed.IEX, limit=10000,
+                adjustment=Adjustment.ALL,   # unadjusted bars make splits look like crashes
             )).data.get(sym, [])
         except Exception as exc:
             log.warning("%s: fetch failed (%s) — skipping", sym, type(exc).__name__)

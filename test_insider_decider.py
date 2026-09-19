@@ -23,8 +23,8 @@ import decider_insider
 from data_feed import EASTERN
 from decider_insider import HOLD_TRADING_DAYS, SL_ATR, TP_ATR, InsiderDecider
 
-# Never touch the live state file from a test run.
-decider_insider.STATE_PATH = Path(tempfile.mkdtemp()) / "insider_state.json"
+# Never touch the live state files from a test run.
+decider_insider.STATE_DIR = Path(tempfile.mkdtemp())
 
 results: list[tuple[bool, str, str]] = []
 
@@ -47,18 +47,20 @@ def ins(buys=1, insiders=1, usd=500_000, cluster=False, csuite=False,
     }
 
 
-def row(symbol="BAC", last=100.0, atr=1.0, insider=None, atr_intraday=0.1):
+def row(symbol="BAC", last=100.0, atr=1.0, insider=None, atr_intraday=0.1,
+        dollar_vol=50e6, dist_ma50=None):
     # atr_intraday is deliberately a tenth of the daily unit, as it is live —
     # any test that passes with the wrong one is a test that would have let
     # the first forward test's bug through.
     r = {"symbol": symbol, "last": last, "atr_14": atr_intraday, "atr_daily": atr,
-         "rsi_14": 50.0, "pct_vs_vwap": 0.0, "spread_pct": 0.03}
+         "rsi_14": 50.0, "pct_vs_vwap": 0.0, "spread_pct": 0.03,
+         "dollar_vol_20": dollar_vol, "dist_ma50_pct": dist_ma50}
     if insider is not None:
         r["insider_form4"] = insider
     return r
 
 
-def ctx(rows, positions=None, at="12:00"):
+def ctx(rows, positions=None, at="12:00", events=None):
     h, m = (int(x) for x in at.split(":"))
     stamp = datetime.now(EASTERN).replace(hour=h, minute=m, second=0, microsecond=0)
     return json.dumps({
@@ -67,15 +69,26 @@ def ctx(rows, positions=None, at="12:00"):
                     "daytrade_count": 0, "minutes_to_close": 180.0},
         "open_positions": positions or [],
         "symbols": rows, "excluded_symbols": [],
+        "insider_events": events or [],
     })
 
 
-def fresh() -> InsiderDecider:
+def event(symbol="BAC", usd=250_000, officer=1, director=0, csuite=0,
+          trader_type="unclassified", days_ago=0, paid=100.0, acc="0001-26-000001"):
+    return {"accession": acc, "symbol": symbol, "issuer_cik": "1", "owner_cik": "9",
+            "owner_name": "Doe Jane",
+            "filing_date": (datetime.now().date() - timedelta(days=days_ago)).isoformat(),
+            "buy_usd": usd, "buy_shares": usd / paid, "price_paid": paid,
+            "is_officer": officer, "is_director": director, "is_10pct": 0,
+            "is_csuite": csuite, "title": "", "trader_type": trader_type}
+
+
+def fresh(regime=False) -> InsiderDecider:
     """A decider with no memory — each check gets its own so the
     one-entry-per-filing rule does not bleed between unrelated checks."""
-    if decider_insider.STATE_PATH.exists():
-        decider_insider.STATE_PATH.unlink()
-    return InsiderDecider()
+    for f in decider_insider.STATE_DIR.glob("*_decider_state.json"):
+        f.unlink()
+    return InsiderDecider(regime=regime, name="insider_regime" if regime else "insider")
 
 
 buys = lambda r: [x for x in r.decisions if x.action == "buy"]
@@ -84,6 +97,57 @@ closes = lambda r: [x for x in r.decisions if x.action == "close"]
 # --- freshness: the failure that would matter most -------------------------
 check(len(buys(fresh().decide(ctx([row(insider=ins(days_ago=0))])))) == 1,
       "fresh filing triggers a buy")
+
+# --- universe-feed events and the pre-registered filters -------------------
+ok = fresh().decide(ctx([row()], events=[event()]))
+check(len(buys(ok)) == 1, "universe event: officer, $250k, liquid -> buy")
+check(not buys(fresh().decide(ctx([row()], events=[event(usd=50_000)]))),
+      "purchase below $100k rejected")
+check(not buys(fresh().decide(ctx([row()], events=[event(officer=0, director=0)]))),
+      "10%-owner-only filer rejected", "t=+0.9 in the study")
+check(not buys(fresh().decide(ctx([row()], events=[event(trader_type="routine")]))),
+      "routine trader rejected", "same month every year = schedule, not information")
+check(not buys(fresh().decide(ctx([row(dollar_vol=400_000)], events=[event()]))),
+      "illiquid name rejected", "<$1M/day")
+check(not buys(fresh().decide(ctx([row(last=100.0)], events=[event(paid=80.0)]))),
+      "deep-discount purchase rejected", "20% below market = placement coded P")
+check(not buys(fresh().decide(ctx([row()], events=[event(days_ago=6)]))),
+      "stale universe event rejected")
+check(not buys(fresh().decide(ctx([row(symbol="XYZ")], events=[event(symbol="ABC")]))),
+      "event with no market-data row cannot be traded")
+
+d = fresh()
+first = buys(d.decide(ctx([row()], events=[event()])))
+again = buys(d.decide(ctx([row()], events=[event()])))
+check(len(first) == 1 and not again, "same accession is not re-entered after close")
+check(len(buys(d.decide(ctx([row()], events=[event(acc="0001-26-000002")])))) == 1,
+      "a new filing (new accession) on the same symbol triggers")
+
+# --- position cap is the strategy's own, not the intraday 3 ----------------
+many_rows = [row(symbol=f"S{i}") for i in range(15)]
+many_ev = [event(symbol=f"S{i}", acc=f"acc{i}") for i in range(15)]
+out = fresh().decide(ctx(many_rows, events=many_ev))
+check(len(buys(out)) == config.INSIDER_MAX_POSITIONS,
+      f"enters up to INSIDER_MAX_POSITIONS ({config.INSIDER_MAX_POSITIONS})", str(len(buys(out))))
+gp = fresh().gate_params
+check(gp["max_positions"] == config.INSIDER_MAX_POSITIONS
+      and abs(gp["size_pct_equity"] - config.INSIDER_EXPOSURE / config.INSIDER_MAX_POSITIONS) < 1e-12,
+      "gate_params declare the book's cap and per-slot size", str(gp))
+
+# --- regime variant --------------------------------------------------------
+spy_up = row(symbol="SPY", dist_ma50=+2.0)
+spy_dn = row(symbol="SPY", dist_ma50=-2.0)
+check(len(buys(fresh(True).decide(ctx([row(), spy_up], events=[event()])))) == 1,
+      "regime: SPY above 50d MA permits entry")
+check(not buys(fresh(True).decide(ctx([row(), spy_dn], events=[event()]))),
+      "regime: SPY below 50d MA blocks entry")
+check(not buys(fresh(True).decide(ctx([row()], events=[event()]))),
+      "regime: unknown SPY state fails closed")
+check(len(buys(fresh().decide(ctx([row(), spy_dn], events=[event()])))) == 1,
+      "non-regime variant ignores SPY")
+pos_r = [{"symbol": "BAC", "avg_entry": 100.0, "qty": 10}]
+check(len(closes(fresh(True).decide(ctx([row(last=98.0), spy_dn], pos_r)))) == 1,
+      "regime blocks entries only — exits still fire")
 
 check(not buys(fresh().decide(ctx([row(insider=ins(days_ago=45))]))),
       "stale filing does NOT trigger", "45 days old, inside the lookback window")
