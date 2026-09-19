@@ -202,6 +202,36 @@ finally:
     config.CONFIDENCE_SIZING = False
 
 
+# ---- per-strategy overrides (gate_params) ----------------------------------
+# A multi-day event strategy declares its own cap and sizing; everything it
+# does NOT declare keeps the config default, and the half-of-cash rule holds.
+class _Declares:
+    gate_params = {"max_positions": 10, "size_pct_equity": 0.05,
+                   "max_position_notional": 1e9}
+
+g10 = RiskGate.for_decider(_Declares())
+held9 = [{"symbol": f"S{i}"} for i in range(9)]
+check("override: 10th position allowed under a 10-cap",
+      g10.evaluate(decision(symbol="NEW"), HEALTHY, held9, 0).approved)
+held10 = held9 + [{"symbol": "S9"}]
+check("override: 11th position refused",
+      not g10.evaluate(decision(symbol="NEW"), HEALTHY, held10, 0).approved)
+r = g10.evaluate(decision(), HEALTHY, [], 0)
+check("override: sized as 5% of equity", abs(r.capped_notional - 0.05 * HEALTHY["equity"]) < 1e-6,
+      f"${r.capped_notional:,.0f} on ${HEALTHY['equity']:,.0f}")
+thin = {**HEALTHY, "cash": 2_000.0}
+r = g10.evaluate(decision(), thin, [], 0)
+check("override: half-of-cash ceiling still binds", r.capped_notional <= 1_000.0,
+      f"cash $2,000 -> ${r.capped_notional:,.0f}")
+gdef = RiskGate.for_decider(object())
+check("no gate_params -> config defaults",
+      not gdef.evaluate(decision(symbol="NEW"), HEALTHY,
+                        [{"symbol": f"S{i}"} for i in range(config.MAX_CONCURRENT_POSITIONS)], 0).approved)
+gjunk = RiskGate.for_decider(type("X", (), {"gate_params": {"bogus": 1}})())
+check("unknown gate_params are ignored, not fatal",
+      gjunk.evaluate(decision(), HEALTHY, [], 0).approved)
+
+
 # ---- report ---------------------------------------------------------------
 width = max(len(name) for _, name, _ in results)
 failures = 0

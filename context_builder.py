@@ -140,6 +140,8 @@ def symbol_context(snap: SymbolSnapshot) -> dict:
         "rsi_14": round(rsi, 1) if rsi is not None else None,
         "atr_14": round(atr, 4) if atr else None,          # 5-minute bars: intraday unit
         "atr_daily": round(snap.atr_daily, 4) if snap.atr_daily else None,  # multi-day unit
+        "dollar_vol_20": round(snap.dollar_vol_20) if snap.dollar_vol_20 else None,
+        "dist_ma50_pct": round(snap.dist_ma50_pct, 2) if snap.dist_ma50_pct is not None else None,
         # Today's range — computed from session bars so it isn't a multi-day span.
         "range_pct_today": round(100 * (max(session_closes) - min(session_closes)) / last, 2)
         if (session_closes and last) else None,
@@ -158,8 +160,10 @@ def build_context(
     account: dict,
     positions: List[dict],
     insider: Optional[dict] = None,
+    insider_events: Optional[List[dict]] = None,
 ) -> str:
-    """insider: {symbol -> summary dict} from InsiderFeed, or None if disabled."""
+    """insider: {symbol -> summary dict} from InsiderFeed, or None if disabled.
+    insider_events: fresh universe-wide Form 4 buy events (InsiderUniverseFeed)."""
     symbols = []
     for s in snapshots:
         if not s.data_ok:
@@ -184,6 +188,7 @@ def build_context(
         "account": account,
         "open_positions": positions,
         "symbols": symbols,
+        "insider_events": insider_events or [],
         "excluded_symbols": [
             {"symbol": s.symbol, "issues": s.data_issues} for s in snapshots if not s.data_ok
         ],

@@ -151,6 +151,24 @@ check([p["symbol"] for p in seen] == ["NVDA"],
 r3 = ShadowRunner({"never_saved": Scripted([])})
 check(not r3.books["never_saved"].positions, "unknown book starts empty")
 
+# --- 10. A strategy's own gate_params govern its shadow book ----------------
+class Sized(Scripted):
+    gate_params = {"max_positions": 10, "size_pct_equity": 0.05,
+                   "max_position_notional": 1e9}
+
+r = ShadowRunner({"big": Sized([buy(f"S{i}") for i in range(12)])}, persist=False)
+out = r.run(ctx([f"S{i}" for i in range(12)]))
+check(len(out["big"]["events"]) == 10 and len(out["big"]["gate_rejected"]) == 2,
+      "per-strategy cap: 10 filled, 2 rejected under a 10-cap",
+      f"{len(out['big']['events'])} filled / {len(out['big']['gate_rejected'])} rejected")
+mv = r.books["big"].positions["S0"].qty * r.books["big"].positions["S0"].entry_price
+check(abs(mv - 5_000.0) < 1.0, "shadow fills at the gate's size (5% of $100k)", f"${mv:,.0f}")
+r2 = ShadowRunner({"flat": Scripted([buy()])}, persist=False)
+r2.run(ctx(["NVDA"]))
+mv2 = r2.books["flat"].positions["NVDA"].qty * r2.books["flat"].positions["NVDA"].entry_price
+check(abs(mv2 - config.FLAT_POSITION_NOTIONAL) < 1.0,
+      "no gate_params -> flat notional as before", f"${mv2:,.0f}")
+
 width = max(len(l) for _, l, _ in results)
 failures = sum(1 for ok, _, _ in results if not ok)
 for ok, label, detail in results:
