@@ -47,7 +47,7 @@ def load_quarter(zpath: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     z = zipfile.ZipFile(zpath)
     sub = pd.read_csv(z.open("SUBMISSION.tsv"), sep="\t", dtype=str,
                       usecols=["ACCESSION_NUMBER", "FILING_DATE", "DOCUMENT_TYPE",
-                               "ISSUERCIK", "ISSUERTRADINGSYMBOL"])
+                               "ISSUERCIK", "ISSUERTRADINGSYMBOL", "AFF10B5ONE"])
     own = pd.read_csv(z.open("REPORTINGOWNER.tsv"), sep="\t", dtype=str,
                       usecols=["ACCESSION_NUMBER", "RPTOWNERCIK", "RPTOWNERNAME",
                                "RPTOWNER_RELATIONSHIP", "RPTOWNER_TITLE"])
@@ -88,6 +88,9 @@ def main() -> None:
               & sub["symbol"].str.fullmatch(r"[A-Z]{1,5}")]
     sub = sub.drop_duplicates("ACCESSION_NUMBER")
     sub["ISSUERCIK"] = sub["ISSUERCIK"].str.strip().str.lstrip("0")
+    # Rule 10b5-1 plan trades are scheduled months in advance — by construction
+    # they carry no information about what the insider knows today.
+    sub["is_10b5_1"] = sub["AFF10B5ONE"].fillna("").str.lower().isin(["1", "true"]).astype(int)
 
     # --- open-market transactions, both directions (sells feed the routine
     #     classification; only buys become events) ----------------------------
@@ -127,7 +130,7 @@ def main() -> None:
                    n_buy_rows=("is_buy", "sum"), n_sell_rows=("is_sell", "sum"),
                    trans_date=("trans_date", "min"))
               .reset_index())
-    f = (agg.merge(sub[["ACCESSION_NUMBER", "filing_date", "symbol", "ISSUERCIK"]],
+    f = (agg.merge(sub[["ACCESSION_NUMBER", "filing_date", "symbol", "ISSUERCIK", "is_10b5_1"]],
                    on="ACCESSION_NUMBER")
             .merge(own[["ACCESSION_NUMBER", "owner_cik", "RPTOWNERNAME", "is_director",
                         "is_officer", "is_10pct", "is_csuite"]],
@@ -197,7 +200,7 @@ def main() -> None:
 
     out = ev[["symbol", "ISSUERCIK", "filing_date", "trans_date", "owner_cik",
               "RPTOWNERNAME", "buy_usd", "buy_shares", "is_director", "is_officer",
-              "is_10pct", "is_csuite", "trader_type", "owner_prior_filings",
+              "is_10pct", "is_csuite", "is_10b5_1", "trader_type", "owner_prior_filings",
               "owner_prior_buys", "n_insiders_30d", "n_buys_30d"]].rename(
         columns={"ISSUERCIK": "issuer_cik", "RPTOWNERNAME": "owner_name"})
     OUT.parent.mkdir(exist_ok=True)

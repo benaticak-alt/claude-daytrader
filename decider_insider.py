@@ -21,6 +21,7 @@ none tuned on the outcome):
     routine     excluded — an insider who trades the same month every year is
                 on a schedule, not on information (routine excess +$1, t=-0.8;
                 everyone else +$8..12, t=+6..9)
+    10b5-1      excluded — plan trades are scheduled months ahead (~3% of buys)
     discount    price paid within INSIDER_MAX_DISCOUNT_PCT of market — a deep
                 discount is a placement coded P, not a vote of confidence
 
@@ -236,6 +237,8 @@ class InsiderDecider:
             return None
         if ev.get("trader_type") == "routine":
             return None
+        if ev.get("is_10b5_1"):
+            return None          # pre-scheduled plan trade: no information by construction
         dv = row.get("dollar_vol_20")
         if dv is None or dv < config.INSIDER_MIN_DOLLAR_VOL:
             return None
