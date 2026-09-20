@@ -72,14 +72,29 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--start", default="2019-10-01")
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--symbols-from", default="insider", choices=["insider", "earnings", "both"],
+                   help="which event file(s) define the symbol list")
+    p.add_argument("--merge", action="store_true",
+                   help="keep symbols already in the output file; fetch only the missing ones")
     p.add_argument("--raw-close", action="store_true",
                    help="fetch UNADJUSTED closes only (data/daily_universe_rawclose.parquet) "
                         "— Form 4 prices are as-traded, so the paid-vs-market discount "
                         "check must compare against unadjusted closes")
     args = p.parse_args()
 
-    ev = pd.read_csv(EVENTS)
-    symbols = sorted(ev["symbol"].unique())
+    syms: set = set()
+    if args.symbols_from in ("insider", "both"):
+        syms |= set(pd.read_csv(EVENTS)["symbol"].unique())
+    if args.symbols_from in ("earnings", "both"):
+        syms |= set(pd.read_csv(EVENTS.with_name("earnings_events.csv"))["symbol"].unique())
+    syms = {s for s in syms if isinstance(s, str) and s.isalpha() and len(s) <= 5}
+    existing = None
+    target = OUT.with_name("daily_universe_rawclose.parquet") if args.raw_close else OUT
+    if args.merge and target.exists():
+        existing = pd.read_parquet(target)
+        syms -= set(existing["symbol"].unique())
+        log.info("merge: %d symbols already present, fetching %d new", existing["symbol"].nunique(), len(syms))
+    symbols = sorted(syms)
     if args.limit:
         symbols = symbols[: args.limit]
     log.info("%d symbols to fetch", len(symbols))
@@ -131,10 +146,12 @@ def main() -> None:
         done = min(i + BATCH, len(symbols))
         log.info("%d/%d symbols  (%.0fs)", done, len(symbols), time.time() - t0)
 
-    if not frames:
+    if not frames and existing is None:
         sys.exit("nothing fetched")
-    out = pd.concat(frames, ignore_index=True)
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["symbol", "ts"])
     out["ts"] = pd.to_datetime(out["ts"], utc=True)
+    if existing is not None:
+        out = pd.concat([existing, out], ignore_index=True)
     OUT.parent.mkdir(exist_ok=True)
     if args.raw_close:
         raw_out = OUT.with_name("daily_universe_rawclose.parquet")
