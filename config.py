@@ -118,7 +118,7 @@ INSIDER_MAX_FILING_AGE_DAYS = int(os.getenv("INSIDER_MAX_FILING_AGE_DAYS", "3"))
 INSIDER_MIN_BUY_USD = float(os.getenv("INSIDER_MIN_BUY_USD", "100000"))
 INSIDER_MIN_DOLLAR_VOL = float(os.getenv("INSIDER_MIN_DOLLAR_VOL", "1000000"))
 INSIDER_MAX_DISCOUNT_PCT = float(os.getenv("INSIDER_MAX_DISCOUNT_PCT", "10"))
-INSIDER_MAX_POSITIONS = int(os.getenv("INSIDER_MAX_POSITIONS", "10"))
+INSIDER_MAX_POSITIONS = int(os.getenv("INSIDER_MAX_POSITIONS", "20"))   # 20 > 10 on both fit and holdout
 # Fraction of equity the whole insider book may hold; per-position size is
 # this divided by INSIDER_MAX_POSITIONS. Half of equity is the owner's rule.
 INSIDER_EXPOSURE = float(os.getenv("INSIDER_EXPOSURE", "0.5"))

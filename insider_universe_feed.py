@@ -222,6 +222,7 @@ class InsiderUniverseFeed:
             "is_officer": int(is_officer), "is_director": int(_flag(rel, "isDirector")),
             "is_10pct": int(_flag(rel, "isTenPercentOwner")),
             "is_csuite": int(is_officer and any(k in title.lower() for k in CSUITE)),
+            "is_10b5_1": int(_flag(root, "aff10b5One")),
             "title": title,
             "trader_type": self.classify_trader(owner_cik, issuer_cik, filing_date),
         }

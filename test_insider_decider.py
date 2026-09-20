@@ -124,8 +124,8 @@ check(len(buys(d.decide(ctx([row()], events=[event(acc="0001-26-000002")])))) ==
       "a new filing (new accession) on the same symbol triggers")
 
 # --- position cap is the strategy's own, not the intraday 3 ----------------
-many_rows = [row(symbol=f"S{i}") for i in range(15)]
-many_ev = [event(symbol=f"S{i}", acc=f"acc{i}") for i in range(15)]
+many_rows = [row(symbol=f"S{i}") for i in range(config.INSIDER_MAX_POSITIONS + 5)]
+many_ev = [event(symbol=f"S{i}", acc=f"acc{i}") for i in range(config.INSIDER_MAX_POSITIONS + 5)]
 out = fresh().decide(ctx(many_rows, events=many_ev))
 check(len(buys(out)) == config.INSIDER_MAX_POSITIONS,
       f"enters up to INSIDER_MAX_POSITIONS ({config.INSIDER_MAX_POSITIONS})", str(len(buys(out))))
