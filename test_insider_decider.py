@@ -74,13 +74,15 @@ def ctx(rows, positions=None, at="12:00", events=None):
 
 
 def event(symbol="BAC", usd=250_000, officer=1, director=0, csuite=0,
-          trader_type="unclassified", days_ago=0, paid=100.0, acc="0001-26-000001"):
+          trader_type="unclassified", days_ago=0, paid=100.0, acc="0001-26-000001",
+          plan=0):
     return {"accession": acc, "symbol": symbol, "issuer_cik": "1", "owner_cik": "9",
             "owner_name": "Doe Jane",
             "filing_date": (datetime.now().date() - timedelta(days=days_ago)).isoformat(),
             "buy_usd": usd, "buy_shares": usd / paid, "price_paid": paid,
             "is_officer": officer, "is_director": director, "is_10pct": 0,
-            "is_csuite": csuite, "title": "", "trader_type": trader_type}
+            "is_csuite": csuite, "is_10b5_1": plan, "title": "",
+            "trader_type": trader_type}
 
 
 def fresh(regime=False) -> InsiderDecider:
@@ -122,6 +124,50 @@ again = buys(d.decide(ctx([row()], events=[event()])))
 check(len(first) == 1 and not again, "same accession is not re-entered after close")
 check(len(buys(d.decide(ctx([row()], events=[event(acc="0001-26-000002")])))) == 1,
       "a new filing (new accession) on the same symbol triggers")
+
+check(not buys(fresh().decide(ctx([row()], events=[event(plan=1)]))),
+      "10b5-1 plan trade rejected", "scheduled months ahead: no information")
+
+# --- TWO fresh filings on one symbol ---------------------------------------
+# Both sit inside the freshness window. Each is a separate disclosure, so each
+# may be traded once — verified in the portfolio sim: allowing this is worth
+# ~3 points of CAGR at the same Sharpe (1.07 vs 1.04), and 40% of events fall
+# within 21 days of a prior event in the same name, so it is a large part of
+# the strategy rather than an edge case. What must NEVER happen is the same
+# filing trading twice (the GME churn bug).
+d = fresh()
+two = [event(acc="newer", days_ago=0, usd=300_000),
+       event(acc="older", days_ago=2, usd=200_000)]
+first = buys(d.decide(ctx([row()], events=two)))
+second = buys(d.decide(ctx([row()], events=two)))     # first position has closed
+third = buys(d.decide(ctx([row()], events=two)))      # both now spent
+check(len(first) == 1 and len(second) == 1 and not third,
+      "each distinct filing trades once, then the symbol is exhausted",
+      f"{len(first)}, {len(second)}, {len(third)}")
+check(set(d._acted) >= {"newer", "older"},
+      "both filings are remembered independently", str(sorted(d._acted)))
+
+# The acted memory is keyed by EVENT, not by symbol, and survives a restart.
+d2 = InsiderDecider(name="insider")
+check(not buys(d2.decide(ctx([row()], events=two))),
+      "restarted process still refuses both spent filings")
+
+# Legacy {symbol: key} state files migrate instead of crashing or re-trading.
+import json as _json
+decider_insider.STATE_DIR.mkdir(parents=True, exist_ok=True)
+(decider_insider.STATE_DIR / "insider_decider_state.json").write_text(
+    _json.dumps({"entries": {}, "acted": {"BAC": "legacykey"}}), encoding="utf-8")
+d3 = InsiderDecider(name="insider")
+check("legacykey" in d3._acted, "legacy symbol->key state migrates to key form",
+      str(d3._acted))
+check(not buys(d3.decide(ctx([row()], events=[event(acc="legacykey")]))),
+      "a filing recorded in legacy state is still not re-traded")
+
+# --- the regime variant declares the rows it needs -------------------------
+check(tuple(fresh(True).requires_symbols) == ("SPY",),
+      "regime variant declares SPY as required", str(fresh(True).requires_symbols))
+check(tuple(fresh().requires_symbols) == (),
+      "plain variant requires nothing extra")
 
 # --- position cap is the strategy's own, not the intraday 3 ----------------
 many_rows = [row(symbol=f"S{i}") for i in range(config.INSIDER_MAX_POSITIONS + 5)]

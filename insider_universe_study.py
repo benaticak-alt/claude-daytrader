@@ -21,6 +21,14 @@ Method (same as the 80-symbol pass, so numbers are comparable):
 Every slice prints n, mean $, excess $ over control, and a t-stat computed on
 the NON-OVERLAPPING subset (one event per symbol per horizon window), since
 overlapping 21-day holds in one name share an outcome and inflate t.
+
+THAT T IS STILL INFLATED — read it as a ranking device between slices, not as
+a significance level. It corrects for overlap WITHIN a symbol but not for
+clustering ACROSS symbols in calendar time, which is the dominant dependence
+here: insiders buy during the same market-wide selloffs, so many "independent"
+events are one bet on one month. Clustering by calendar month takes the core
+filter from t=+7.8 to t=+3.4. Use insider_significance.py for any number you
+intend to quote or act on.
 """
 
 from __future__ import annotations
@@ -127,11 +135,14 @@ def nonoverlap(ev: pd.DataFrame, horizon: int) -> pd.Series:
     """True for events at least `horizon` trading days after the previous kept
     event in the same symbol."""
     keep = np.zeros(len(ev), bool)
+    # Positional, not label-based: ev is reset_index()ed by the caller, but
+    # index.get_loc() inside the loop made this quadratic (minutes on 66k rows).
+    order = np.arange(len(ev))
     for _, g in ev.groupby("symbol", sort=False):
         last = -10**9
-        for i, pos in zip(g.index, g["bar_idx"]):
+        for loc, pos in zip(order[ev.index.get_indexer(g.index)], g["bar_idx"]):
             if pos - last >= horizon:
-                keep[ev.index.get_loc(i)] = True
+                keep[loc] = True
                 last = pos
     return pd.Series(keep, index=ev.index)
 

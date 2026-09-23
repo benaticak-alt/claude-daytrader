@@ -97,6 +97,48 @@ if runner:
     print(runner.report())
 
 print()
+# --- the cycle's symbol list must cover everything a strategy needs --------
+# A strategy that gates on a benchmark it never trades (the regime variant and
+# SPY) gets no row unless main asks for one, and then fails closed forever —
+# a forward test that silently measures nothing. Held symbols matter for the
+# same reason: no row means no exit.
+class _FakeFeed:
+    def __init__(self): self.seen = []
+    def snapshot(self, sym):
+        self.seen.append(sym)
+        raise RuntimeError("stop once the symbol list is built")
+
+
+class _Acct:
+    def account_state(self):
+        return {"equity": 100_000.0, "cash": 100_000.0, "daily_pl": 0.0, "daytrade_count": 0}
+    def open_positions(self): return [{"symbol": "AAPL", "avg_entry": 100.0, "qty": 1}]
+    def minutes_to_close(self): return 180.0
+    def submit_entry(self, *a, **k): raise AssertionError("ORDER ATTEMPTED")
+    def close_position(self, *a, **k): raise AssertionError("ORDER ATTEMPTED")
+
+
+_saved_watchlist = config.WATCHLIST
+try:
+    config.WATCHLIST = ["NVDA", "GME"]                 # deliberately no SPY
+    import decider_insider  # noqa: E402
+    _runner = main.build_shadow_runner()
+    _runner.deciders["regime_probe"] = decider_insider.InsiderDecider(
+        regime=True, name="regime_probe")
+    _runner.books["regime_probe"] = shadow.ShadowBook("regime_probe", 1000.0)
+    _runner.books["regime_probe"].positions["UPST"] = shadow.VirtualPosition("UPST", 10, 25.0)
+    _feed = _FakeFeed()
+    main.run_cycle(_feed, main.build_decider(), RiskGate(), _Acct(), None, _runner, None)
+    _seen = _feed.seen
+    check({"NVDA", "GME"} <= set(_seen), "watchlist symbols are snapshotted", str(_seen))
+    check("SPY" in _seen, "a strategy's requires_symbols are added to the cycle",
+          "regime variant needs SPY, which is not in the watchlist")
+    check("AAPL" in _seen, "live-held symbols are snapshotted (or they can never exit)")
+    check("UPST" in _seen, "shadow-held symbols are snapshotted too")
+    check(len(_seen) == len(set(_seen)), "no symbol is snapshotted twice", str(_seen))
+finally:
+    config.WATCHLIST = _saved_watchlist
+
 width = max(len(l) for _, l, _ in results)
 failures = sum(1 for ok, _, _ in results if not ok)
 for ok, label, detail in results:
