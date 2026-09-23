@@ -169,13 +169,24 @@ def run_cycle(
                     symbols.append(s)
         except Exception:
             log.exception("insider universe refresh failed — continuing without it")
-    held_everywhere = {p["symbol"] for p in positions}
+    # Anything a strategy needs a row for even when it isn't trading it: a
+    # benchmark it gates on, for instance. Without SPY present the regime
+    # variant's check fails closed and it silently never trades — a forward
+    # test that quietly measures nothing.
+    extra_symbols: set = set()
+    all_deciders = [decider]
     if shadow_runner is not None:
+        all_deciders += list(shadow_runner.deciders.values())
         for book in shadow_runner.books.values():
-            held_everywhere |= set(book.positions)
-    for s in sorted(held_everywhere):
-        if s not in symbols:
-            symbols.append(s)
+            # A held symbol with no row can never be exited.
+            extra_symbols |= set(book.positions)
+    for dec in all_deciders:
+        extra_symbols |= set(getattr(dec, "requires_symbols", ()) or ())
+    extra_symbols |= {p["symbol"] for p in positions}
+
+    for sym in sorted(extra_symbols):
+        if sym not in symbols:
+            symbols.append(sym)
 
     # Time-to-close drives both the entry cutoff (enforced in the risk gate)
     # and the hard flatten below.

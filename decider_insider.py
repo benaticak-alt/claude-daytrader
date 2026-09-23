@@ -1,9 +1,20 @@
 """Insider-buy decider — trades fresh SEC Form 4 open-market purchases.
 
 The only signal in this project that survived a symbol- and period-matched
-control. Re-measured 2026-09-17 on the FULL universe (65,844 events, 5,764
-symbols incl. 1,800 later-delisted, entry at the next open after filing):
-excess over control +$12/trade per $1,000, t=+10 on non-overlapping events.
+control. Measured on the FULL universe (65,844 events, 5,764 symbols incl.
+1,800 later-delisted, entry at the next open after filing): excess over
+control about +$10/trade per $1,000.
+
+ON THE T-STAT: the study prints t=+8..10, and that number is INFLATED. It
+removes overlap within a symbol but not clustering across symbols in calendar
+time — insiders buy their own companies during the same selloffs, so hundreds
+of "independent" trades are one bet on one month. Clustered by calendar month
+the honest figure is t=+3.4 (79 months, 63% positive, stationary-bootstrap
+95% CI [+$5.0, +$16.9]). It survives dropping the best month, excluding all of
+2020, the 2024+ holdout alone (t=+2.2), and round-trip costs up to ~40bp.
+Real, and about a third as significant as the raw number suggests. Run
+insider_significance.py for the full breakdown before quoting any t.
+
 Small per event; real. It is a different animal from the intraday strategies:
 
     universe   every issuer on EDGAR — events are rare per name
@@ -29,13 +40,20 @@ NO MODEL. The trained classifier scored AUC 0.473 — below random. There is
 no skill in selecting among qualifying events, so this takes them all,
 ranked only so the position cap spends itself on the strongest roles.
 
-WHY THIS RUNS IN SHADOW: the account-level simulation (insider_portfolio_sim)
-at half exposure did ~16% CAGR with a 37% drawdown — 94 straight dip-buys into
-March 2020 at a 10% win rate. SPY did 13.5% / -34% over the same window. The
-per-event edge is real; whether a capital-constrained book harvests enough of
-it to beat the index is exactly what the forward test is for. The `regime`
-variant (no new entries while SPY is below its 50-day average) cut the
-drawdown to 23% in simulation; it is run as a SECOND shadow, not assumed.
+WHY THIS RUNS IN SHADOW: the account-level simulation (insider_portfolio_sim
+--mtm, 20 slots, half exposure, marked to market daily) returned 16.7% CAGR
+with a 32% drawdown and Sharpe 1.05, against SPY 13.5% / -34% / 0.70 over
+2020-2026. A few points a year over the index at comparable risk — worth
+having, and nowhere near what "trading bot" usually implies. Whether a
+capital-constrained book actually harvests it is exactly what the forward test
+is for. The `regime` variant (no new entries while SPY is below its 50-day
+average) cut the drawdown to ~24% in simulation at slightly lower return; it
+is run as a SECOND shadow so the choice is settled by data, not assumed.
+
+A symbol may be entered again on a DIFFERENT filing once a prior position has
+closed. That is deliberate: 40% of qualifying events fall within 21 days of a
+prior event in the same name, and blocking them costs ~3 points of CAGR at the
+same Sharpe. What must never happen is the same filing trading twice.
 
 FILING DATE IS THE ONLY TRADEABLE DATE. Form 4 allows two business days after
 the transaction, so freshness is keyed on the filing, never the transaction.
@@ -45,7 +63,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -62,6 +80,20 @@ HOLD_TRADING_DAYS = 21
 # A filing is actionable for a few days — the disclosure is the event, and the
 # documented drift plays out over weeks, so there is no need to catch the tick.
 MAX_FILING_AGE_DAYS = config.INSIDER_MAX_FILING_AGE_DAYS
+
+
+def filing_date_of(key: str, row: dict) -> str:
+    """Filing date for an acted-on event key, for pruning purposes.
+
+    Universe events carry an accession whose date is not parseable here, so
+    fall back to today — an event traded today is by definition fresh today,
+    and the prune window is generous enough that an off-by-a-day is harmless.
+    """
+    tail = key.rsplit(":", 1)[-1]
+    try:
+        return datetime.fromisoformat(tail).date().isoformat()
+    except ValueError:
+        return datetime.now().date().isoformat()
 
 
 class InsiderDecider:
@@ -82,6 +114,9 @@ class InsiderDecider:
     def __init__(self, regime: bool = False, name: str = "insider") -> None:
         self.regime = regime
         self.name = name
+        # Symbols this strategy needs a market-data row for regardless of
+        # whether it wants to trade them. main adds these to every cycle.
+        self.requires_symbols = ("SPY",) if regime else ()
         self.state_path = STATE_DIR / f"{name}_decider_state.json"
         # Per-strategy risk limits, read by main and the shadow runner. The
         # intraday defaults (3 positions, $2k) would make the book untestable.
@@ -93,9 +128,12 @@ class InsiderDecider:
         # symbol -> {"atr": entry DAILY ATR, "ts": entry time iso, "key": event}.
         # Persisted: a 21-day hold outlives any single process.
         self._entries: Dict[str, dict] = {}
-        # symbol -> event key already acted on. ONE ENTRY PER FILING. Without
-        # this the strategy re-enters the same disclosure every time the
-        # previous position closes — observed live: GME six times in two days.
+        # EVENT KEY -> filing date, for every disclosure already traded.
+        # ONE ENTRY PER FILING. Keyed by the event, NOT by the symbol: two
+        # filings for one issuer can both sit inside the freshness window, and
+        # a symbol->latest-key map would leave the older one eligible again as
+        # soon as the newer one's position closed — the GME churn bug in a new
+        # costume. Pruned to the freshness window, so it cannot grow forever.
         self._acted: Dict[str, str] = {}
         self._load_state()
 
@@ -105,7 +143,14 @@ class InsiderDecider:
             if self.state_path.exists():
                 st = json.loads(self.state_path.read_text(encoding="utf-8"))
                 self._entries = st.get("entries", {})
-                self._acted = st.get("acted", {})
+                acted = st.get("acted", {})
+                if st.get("acted_shape") != "key":
+                    # Legacy {symbol: key}. The keys are what matter; the dates
+                    # are unknown, so stamp today and let them age out normally.
+                    today = datetime.now().date().isoformat()
+                    acted = {k: today for k in acted.values() if k}
+                self._acted = acted
+                self._prune_acted()
                 log.info("%s state loaded: %d open entries, %d filings acted on",
                          self.name, len(self._entries), len(self._acted))
         except Exception:
@@ -115,11 +160,19 @@ class InsiderDecider:
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             self.state_path.write_text(
-                json.dumps({"entries": self._entries, "acted": self._acted}),
+                json.dumps({"entries": self._entries, "acted": self._acted,
+                            "acted_shape": "key"}),
                 encoding="utf-8",
             )
         except Exception:
             log.exception("could not save %s state", self.name)
+
+    def _prune_acted(self) -> None:
+        """Forget disclosures older than the freshness window — they can never
+        qualify again, so keeping them only grows the state file."""
+        cutoff = (datetime.now().date()
+                  - timedelta(days=MAX_FILING_AGE_DAYS + 7)).isoformat()
+        self._acted = {k: v for k, v in self._acted.items() if v >= cutoff}
 
     # ------------------------------------------------------------------
     def decide(self, context_json: str) -> CycleDecisions:
@@ -195,7 +248,7 @@ class InsiderDecider:
                 time_horizon_minutes=HOLD_TRADING_DAYS * 390,
             ))
             self._entries[sym] = {"atr": atr_d, "ts": as_of, "key": key}
-            self._acted[sym] = key
+            self._acted[key] = filing_date_of(key, rows[sym])
             entered += 1
             changed = True
 
@@ -227,7 +280,7 @@ class InsiderDecider:
         """Apply the pre-registered filters to a universe-feed event."""
         sym = ev["symbol"]
         key = ev.get("accession") or f"{sym}:{ev.get('filing_date')}"
-        if self._acted.get(sym) == key:
+        if key in self._acted:
             return None
         if not self._is_fresh(ev.get("filing_date")):
             return None
@@ -286,8 +339,8 @@ class InsiderDecider:
         most_recent = buys.get("most_recent")
         if not recent and not self._is_fresh(most_recent):
             return None
-        key = str(most_recent or datetime.now().date().isoformat())
-        if self._acted.get(row["symbol"]) == key:
+        key = f"{row['symbol']}:{most_recent or datetime.now().date().isoformat()}"
+        if key in self._acted:
             return None
         usd = buys.get("total_usd") or 0
         if usd < config.INSIDER_MIN_BUY_USD:

@@ -296,6 +296,9 @@ class InsiderUniverseFeed:
         for e in self.fresh_events():
             if e["buy_usd"] < min_usd or e["trader_type"] == "routine":
                 continue
+            if e.get("is_10b5_1"):
+                continue          # matches the decider; otherwise we snapshot
+                                  # symbols that are certain to be rejected
             if roles == "officer_director" and not (e["is_officer"] or e["is_director"]):
                 continue
             if e["symbol"] not in out:
