@@ -35,7 +35,7 @@ echo ============================================================
 echo.
 echo   SAFE - no orders, no API cost
 echo     1. Connection check       read-only, verifies keys + data
-echo     2. Risk gate tests        21 adversarial tests
+echo     2. Run all tests          gate, lock, strategies, shadow, observe
 echo     3. Dry run                full chain, fake data, mock broker
 echo     4. Paper P/L report       actual fills from Alpaca
 echo     5. Calibration report     stats over the decision log
@@ -84,7 +84,19 @@ goto done
 
 :gatetests
 cls
-%PY% test_gate.py
+echo Running the full suite - every file must pass.
+echo.
+for %%T in (test_gate test_lock test_orb test_scheduled test_ml test_shadow test_insider_decider test_observe) do (
+    echo --- %%T ---
+    %PY% %%T.py
+    if errorlevel 1 (
+        echo.
+        echo FAILED: %%T  - stopping here.
+        goto done
+    )
+)
+echo.
+echo All suites passed.
 goto done
 
 :dryrun
