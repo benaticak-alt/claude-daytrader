@@ -27,3 +27,6 @@ venv/
 !.env.example
 *.key
 *.pem
+
+# Runtime instance lock - per-machine, never shared
+bot.lock

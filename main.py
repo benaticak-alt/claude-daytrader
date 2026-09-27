@@ -21,6 +21,7 @@ from decider import Decider
 from models import CycleDecisions
 from executor import Executor
 from insider_feed import InsiderFeed
+from instance_lock import AlreadyRunning, InstanceLock
 from risk_gate import RiskGate
 from trade_log import log_cycle
 
@@ -299,10 +300,24 @@ def run_cycle(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="run a single cycle and exit")
+    parser.add_argument("--force", action="store_true",
+                        help="start even if another instance holds the lock (dangerous: "
+                             "two bots share the same state files)")
     args = parser.parse_args()
 
     if not config.ALPACA_API_KEY or not config.ALPACA_SECRET_KEY:
         sys.exit("Set ALPACA_API_KEY / ALPACA_SECRET_KEY in .env (see .env.example)")
+
+    # One bot at a time. Auto-start on logon means a hand-started terminal and
+    # the scheduled task can now collide, and both write the same shadow books
+    # and decision log — the second would corrupt the first's record instead of
+    # failing loudly. Held for the whole run, released on any exit.
+    lock = InstanceLock(force=args.force)
+    try:
+        lock.acquire()
+    except AlreadyRunning as e:
+        log.error("refusing to start: %s", e)
+        sys.exit(1)
 
     feed = DataFeed()
     decider = build_decider()
@@ -328,7 +343,10 @@ def main() -> None:
     log.info("=" * 60)
 
     if args.once:
-        run_cycle(feed, decider, gate, executor, insider_feed, shadow_runner, universe_feed)
+        try:
+            run_cycle(feed, decider, gate, executor, insider_feed, shadow_runner, universe_feed)
+        finally:
+            lock.release()
         return
 
     cycles = 0
@@ -359,6 +377,7 @@ def main() -> None:
         log.exception("FATAL: loop died after %d cycles", cycles)
         raise
     finally:
+        lock.release()
         log.info("bot exiting after %d cycles", cycles)
 
 

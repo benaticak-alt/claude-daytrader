@@ -69,6 +69,28 @@ def main() -> None:
     except Exception as exc:
         line(WARN, "process check", f"could not enumerate: {type(exc).__name__}")
 
+    # --- 1b. The instance lock says definitively whether a bot owns the state
+    # files. Process-name matching cannot: other projects on this machine have
+    # a main.py too, which is why check 1 can only WARN.
+    try:
+        from instance_lock import InstanceLock
+        lk = InstanceLock()
+        holder = lk.holder()
+        if holder:
+            line(OK, "instance lock",
+                 f"held by pid {holder['pid']}, since {holder.get('started', '?')}")
+        elif lk.path.exists():
+            try:
+                stale_pid = json.loads(lk.path.read_text(encoding="utf-8")).get("pid")
+            except Exception:                              # noqa: BLE001
+                stale_pid = "?"
+            line(WARN, "instance lock",
+                 f"stale (pid {stale_pid} is gone) — a restart will clear it")
+        else:
+            line(OK, "instance lock", "free — no bot owns the state files")
+    except Exception as exc:                               # noqa: BLE001
+        line(WARN, "instance lock", f"could not read: {type(exc).__name__}")
+
     # --- 2. Decision log freshness — the authoritative signal --------------
     # If the loop is alive during market hours this file updates every cycle.
     if not config.DECISION_LOG.exists():
@@ -133,6 +155,7 @@ def main() -> None:
     if issues:
         print("VERDICT: problems found -> " + ", ".join(issues))
         print("\nTo start the bot:  python main.py")
+        print("Auto-start on logon: install_startup.ps1 (see its header)")
         sys.exit(1)
     print("VERDICT: healthy")
 
